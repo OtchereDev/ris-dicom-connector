@@ -45,10 +45,9 @@ func (f *AdapterFactory) GetAdapter(config models.PACSConfig) (PACSAdapter, erro
 	case models.PACSTypeDICOMWeb:
 		adapter, err = NewDICOMWebAdapter(config)
 	case models.PACSTypeDIMSE:
-		// TODO: Implement DIMSE adapter
-		return nil, fmt.Errorf("DIMSE adapter not yet implemented")
+		adapter, err = NewDIMSEAdapter(config)
 	case models.PACSTypeOrthanc:
-		// TODO: Implement Orthanc adapter (or use DICOMweb)
+		// Orthanc supports both DICOMweb and DIMSE
 		adapter, err = NewDICOMWebAdapter(config)
 	default:
 		return nil, fmt.Errorf("unsupported PACS type: %s", config.Type)

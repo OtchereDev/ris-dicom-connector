@@ -8,6 +8,7 @@ import (
 
 	"github.com/OtchereDev/ris-common-sdk/pkg/io-dicom/dictionary/tags"
 	"github.com/OtchereDev/ris-common-sdk/pkg/io-dicom/media"
+	"github.com/OtchereDev/ris-common-sdk/pkg/io-dicom/network"
 	"github.com/OtchereDev/ris-common-sdk/pkg/io-dicom/services"
 	"github.com/otcheredev/ris-dicom-connector/internal/models"
 )
@@ -15,22 +16,28 @@ import (
 // DIMSEAdapter implements PACSAdapter for DIMSE protocol
 type DIMSEAdapter struct {
 	BaseAdapter
-	config     models.PACSConfig
-	callingAET string
-	calledAET  string
-	host       string
-	port       int
+	config      models.PACSConfig
+	destination *network.Destination
+	timeout     int
 }
 
 // NewDIMSEAdapter creates a new DIMSE adapter
 func NewDIMSEAdapter(config models.PACSConfig) (*DIMSEAdapter, error) {
+	destination := &network.Destination{
+		HostName:  config.Endpoint,
+		Port:      config.Port,
+		CalledAE:  config.AETitle,
+		CallingAE: "DICOM_CONNECTOR",
+		IsCFind:   true,
+		IsCMove:   true,
+		IsCStore:  true,
+	}
+
 	return &DIMSEAdapter{
 		BaseAdapter: BaseAdapter{config: config},
 		config:      config,
-		callingAET:  "DICOM_CONNECTOR",
-		calledAET:   config.AETitle,
-		host:        config.Endpoint,
-		port:        config.Port,
+		destination: destination,
+		timeout:     30, // 30 seconds default timeout
 	}, nil
 }
 
@@ -44,13 +51,7 @@ func (d *DIMSEAdapter) Capabilities() []string {
 
 // createSCU creates a new SCU (Service Class User) connection
 func (d *DIMSEAdapter) createSCU() services.SCU {
-	scu := services.NewSCU(
-		d.callingAET,
-		d.calledAET,
-		d.host,
-		d.port,
-	)
-	return scu
+	return services.NewSCU(d.destination)
 }
 
 // FindStudies queries for studies using C-FIND
@@ -67,7 +68,7 @@ func (d *DIMSEAdapter) FindStudies(ctx context.Context, params models.QueryParam
 	if params.PatientID != "" {
 		query.WriteString(tags.PatientID, params.PatientID)
 	} else {
-		query.WriteString(tags.PatientID, "") // Universal matching
+		query.WriteString(tags.PatientID, "")
 	}
 
 	if params.PatientName != "" {
@@ -107,37 +108,23 @@ func (d *DIMSEAdapter) FindStudies(ctx context.Context, params models.QueryParam
 	query.WriteString(tags.NumberOfStudyRelatedSeries, "")
 	query.WriteString(tags.NumberOfStudyRelatedInstances, "")
 
-	// Execute C-FIND with timeout
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	// Store results
+	var studies []models.Study
 
-	resultsChan := make(chan []media.DcmObj, 1)
-	errorChan := make(chan error, 1)
+	// Set result handler
+	scu.SetOnCFindResult(func(result media.DcmObj) {
+		study := d.dicomToStudy(result)
+		studies = append(studies, study)
+	})
 
-	go func() {
-		results, err := scu.CFindStudy(query)
-		if err != nil {
-			errorChan <- err
-			return
-		}
-		resultsChan <- results
-	}()
-
-	var dicomResults []media.DcmObj
-	select {
-	case dicomResults = <-resultsChan:
-		// Success
-	case err := <-errorChan:
+	// Execute C-FIND
+	_, status, err := scu.FindSCU(query, d.timeout)
+	if err != nil {
 		return nil, fmt.Errorf("C-FIND failed: %w", err)
-	case <-timeoutCtx.Done():
-		return nil, fmt.Errorf("C-FIND timeout")
 	}
 
-	// Convert DICOM objects to Study models
-	studies := make([]models.Study, 0, len(dicomResults))
-	for _, dcmObj := range dicomResults {
-		study := d.dicomToStudy(dcmObj)
-		studies = append(studies, study)
+	if status != 0x0000 {
+		return nil, fmt.Errorf("C-FIND completed with non-success status: 0x%04X", status)
 	}
 
 	return studies, nil
@@ -163,37 +150,23 @@ func (d *DIMSEAdapter) FindSeries(ctx context.Context, studyUID string) ([]model
 	query.WriteString(tags.SeriesTime, "")
 	query.WriteString(tags.NumberOfSeriesRelatedInstances, "")
 
+	// Store results
+	var series []models.Series
+
+	// Set result handler
+	scu.SetOnCFindResult(func(result media.DcmObj) {
+		s := d.dicomToSeries(result)
+		series = append(series, s)
+	})
+
 	// Execute C-FIND
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	resultsChan := make(chan []media.DcmObj, 1)
-	errorChan := make(chan error, 1)
-
-	go func() {
-		results, err := scu.CFindSeries(query)
-		if err != nil {
-			errorChan <- err
-			return
-		}
-		resultsChan <- results
-	}()
-
-	var dicomResults []media.DcmObj
-	select {
-	case dicomResults = <-resultsChan:
-		// Success
-	case err := <-errorChan:
+	_, status, err := scu.FindSCU(query, d.timeout)
+	if err != nil {
 		return nil, fmt.Errorf("C-FIND failed: %w", err)
-	case <-timeoutCtx.Done():
-		return nil, fmt.Errorf("C-FIND timeout")
 	}
 
-	// Convert DICOM objects to Series models
-	series := make([]models.Series, 0, len(dicomResults))
-	for _, dcmObj := range dicomResults {
-		s := d.dicomToSeries(dcmObj)
-		series = append(series, s)
+	if status != 0x0000 {
+		return nil, fmt.Errorf("C-FIND completed with non-success status: 0x%04X", status)
 	}
 
 	return series, nil
@@ -220,37 +193,23 @@ func (d *DIMSEAdapter) FindInstances(ctx context.Context, studyUID, seriesUID st
 	query.WriteString(tags.BitsAllocated, "")
 	query.WriteString(tags.NumberOfFrames, "")
 
+	// Store results
+	var instances []models.Instance
+
+	// Set result handler
+	scu.SetOnCFindResult(func(result media.DcmObj) {
+		instance := d.dicomToInstance(result)
+		instances = append(instances, instance)
+	})
+
 	// Execute C-FIND
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	resultsChan := make(chan []media.DcmObj, 1)
-	errorChan := make(chan error, 1)
-
-	go func() {
-		results, err := scu.CFindImage(query)
-		if err != nil {
-			errorChan <- err
-			return
-		}
-		resultsChan <- results
-	}()
-
-	var dicomResults []media.DcmObj
-	select {
-	case dicomResults = <-resultsChan:
-		// Success
-	case err := <-errorChan:
+	_, status, err := scu.FindSCU(query, d.timeout)
+	if err != nil {
 		return nil, fmt.Errorf("C-FIND failed: %w", err)
-	case <-timeoutCtx.Done():
-		return nil, fmt.Errorf("C-FIND timeout")
 	}
 
-	// Convert DICOM objects to Instance models
-	instances := make([]models.Instance, 0, len(dicomResults))
-	for _, dcmObj := range dicomResults {
-		instance := d.dicomToInstance(dcmObj)
-		instances = append(instances, instance)
+	if status != 0x0000 {
+		return nil, fmt.Errorf("C-FIND completed with non-success status: 0x%04X", status)
 	}
 
 	return instances, nil
@@ -292,23 +251,30 @@ func (d *DIMSEAdapter) GetInstanceMetadata(ctx context.Context, studyUID, series
 	query.WriteString(tags.SamplesPerPixel, "")
 	query.WriteString(tags.NumberOfFrames, "")
 
+	var metadata *models.Metadata
+
+	// Set result handler
+	scu.SetOnCFindResult(func(result media.DcmObj) {
+		metadata = &models.Metadata{
+			SOPInstanceUID:    result.GetString(tags.SOPInstanceUID),
+			SOPClassUID:       result.GetString(tags.SOPClassUID),
+			TransferSyntaxUID: "", // Not available via C-FIND
+			Attributes:        d.extractAttributes(result),
+		}
+	})
+
 	// Execute C-FIND
-	results, err := scu.CFindImage(query)
+	_, status, err := scu.FindSCU(query, d.timeout)
 	if err != nil {
 		return nil, fmt.Errorf("C-FIND failed: %w", err)
 	}
 
-	if len(results) == 0 {
-		return nil, fmt.Errorf("instance not found")
+	if status != 0x0000 {
+		return nil, fmt.Errorf("C-FIND completed with non-success status: 0x%04X", status)
 	}
 
-	// Convert first result to metadata
-	dcmObj := results[0]
-	metadata := &models.Metadata{
-		SOPInstanceUID:    dcmObj.GetString(tags.SOPInstanceUID),
-		SOPClassUID:       dcmObj.GetString(tags.SOPClassUID),
-		TransferSyntaxUID: "", // Not available via C-FIND
-		Attributes:        d.extractAttributes(dcmObj),
+	if metadata == nil {
+		return nil, fmt.Errorf("instance not found")
 	}
 
 	return metadata, nil
@@ -358,24 +324,8 @@ func (d *DIMSEAdapter) TestConnection(ctx context.Context) (*models.ConnectionSt
 
 	scu := d.createSCU()
 
-	// Perform C-ECHO with timeout
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	errorChan := make(chan error, 1)
-
-	go func() {
-		err := scu.CEcho()
-		errorChan <- err
-	}()
-
-	var err error
-	select {
-	case err = <-errorChan:
-		// C-ECHO completed
-	case <-timeoutCtx.Done():
-		err = fmt.Errorf("C-ECHO timeout")
-	}
+	// Perform C-ECHO
+	err := scu.EchoSCU(d.timeout)
 
 	status.ResponseTime = time.Since(start).Milliseconds()
 
@@ -445,7 +395,7 @@ func (d *DIMSEAdapter) dicomToInstance(dcmObj media.DcmObj) models.Instance {
 	}
 }
 
-func (d *DIMSEAdapter) getIntValue(dcmObj media.DcmObj, tagID uint32) int {
+func (d *DIMSEAdapter) getIntValue(dcmObj media.DcmObj, tagID *tags.Tag) int {
 	str := dcmObj.GetString(tagID)
 	if str == "" {
 		return 0
