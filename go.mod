@@ -3,6 +3,7 @@ module github.com/otcheredev/ris-dicom-connector
 go 1.25.3
 
 require (
+	github.com/OtchereDev/ris-common-sdk v0.0.0-20251018132619-5a9fbad62acc
 	github.com/go-chi/cors v1.2.2
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus/client_golang v1.23.2
@@ -11,7 +12,6 @@ require (
 )
 
 require (
-	github.com/OtchereDev/ris-common-sdk v0.0.0-20251018132619-5a9fbad62acc // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
@@ -26,10 +26,8 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
-	github.com/suyashkumar/dicom v1.1.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/crypto v0.39.0 // indirect
-	golang.org/x/exp v0.0.0-20240525044651-4c93da0ed11d // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
